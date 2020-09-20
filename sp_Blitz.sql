@@ -37,7 +37,7 @@ AS
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	
 
-	SELECT @Version = '7.98', @VersionDate = '20200808';
+	SELECT @Version = '7.99', @VersionDate = '20200913';
 	SET @OutputType = UPPER(@OutputType);
 
     IF(@VersionCheckMode = 1)
@@ -1280,6 +1280,35 @@ AS
 								AND bs.backup_size >= 50000000000 /* At least 50GB */
 								AND DATEDIFF(SECOND, bs.backup_start_date, bs.backup_finish_date) <= 60 /* Backup took less than 60 seconds */
 								AND bs.backup_finish_date >= DATEADD(DAY, -14, GETDATE()); /* In the last 2 weeks */
+					END;
+
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 236 )
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 236) WITH NOWAIT;
+						
+						INSERT  INTO #BlitzResults
+								( CheckID ,
+								  Priority ,
+								  FindingsGroup ,
+								  Finding ,
+								  URL ,
+								  Details
+								)
+								SELECT TOP 1 236 AS CheckID ,
+										50 AS Priority ,
+										'Performance' AS FindingsGroup ,
+										'Snapshotting Too Many Databases' AS Finding ,
+										'https://BrentOzar.com/go/toomanysnaps' AS URL ,
+										( CAST(SUM(1) AS VARCHAR(20)) + ' databases snapshotted at once in the last two weeks, indicating that IO may be freezing up. Microsoft does not recommend VSS snaps for 35 or more databases.') AS Details
+								FROM msdb.dbo.backupset bs
+								WHERE bs.type = 'D'
+								AND bs.backup_finish_date >= DATEADD(DAY, -14, GETDATE()) /* In the last 2 weeks */
+								GROUP BY bs.backup_finish_date
+								HAVING SUM(1) >= 35
+								ORDER BY SUM(1) DESC;
 					END;
 
 				IF NOT EXISTS ( SELECT  1
@@ -8308,7 +8337,6 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 										EXEC master..xp_fixeddrives;
 								
 								IF EXISTS (SELECT * FROM sys.all_objects WHERE name = 'dm_os_volume_stats')
-									AND 100 >= (SELECT COUNT(*) FROM sys.master_files)
 								BEGIN
 									SET @StringToExecute = 'Update #driveInfo
 									SET
@@ -8325,7 +8353,13 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 													,available_bytes/1024/1024 AS available_MB
 													,(CONVERT(DECIMAL(4,2),(total_bytes/1.0 - available_bytes)/total_bytes * 100))  AS used_percent
 												FROM
-													sys.master_files AS f
+													(SELECT TOP 1 WITH TIES 
+														database_id
+														,file_id
+														,SUBSTRING(physical_name,1,1) AS Drive
+													 FROM sys.master_files
+													 ORDER BY ROW_NUMBER() OVER(PARTITION BY SUBSTRING(physical_name,1,1) ORDER BY database_id)
+													) f
 												CROSS APPLY
 													sys.dm_os_volume_stats(f.database_id, f.file_id)
 									) as v on #driveInfo.drive = v.volume_mount_point;';
